@@ -49,14 +49,14 @@ from typing import List, Dict
 
 def extract_sections(pdf_path):
     doc = fitz.open(pdf_path)
-    section_pattern = re.compile(r"(\d{6})([\s\S]*?)(end of section)", re.IGNORECASE)
+    # Pattern: '033000' (5-10 digits in single quotes), then text, then 'End of Section'
+    section_pattern = re.compile(r"'([0-9]{5,10})'([\s\S]*?)'End of Section'", re.IGNORECASE)
     sections = []
     for page_num, page in enumerate(doc):
         text = page.get_text()
         for match in section_pattern.finditer(text):
             section_number = match.group(1)
             section_text = match.group(2).strip()
-            # Save section with section number, text, and page number
             sections.append({
                 "section_number": section_number,
                 "text": section_text,
@@ -137,6 +137,9 @@ if st.button("Run Semantic Search"):
     st.write(f"Product chunks: {len(prod_chunks)} | Job spec chunks: {len(job_chunks)} | Sections: {', '.join(selected_sections) if selected_sections else 'All'}")
 
     # Embedding and FAISS
+    if not job_chunks:
+        st.warning("No job spec sections found for the given filter. Please check your section numbers or leave the filter empty to process all sections.")
+        st.stop()
     job_embeds = embed_chunks(job_chunks)
     faiss_index = build_faiss_index(np.array(job_embeds))
     prod_embeds = embed_chunks(prod_chunks)

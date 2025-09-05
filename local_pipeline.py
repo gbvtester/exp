@@ -1,3 +1,5 @@
+import sys
+print("Python executable:", sys.executable)
 import streamlit as st
 import os
 import shutil

@@ -1,5 +1,5 @@
 import sys
-print("Python executable:", sys.executable)
+# print("Python executable:", sys.executable)
 import streamlit as st
 import os
 import shutil
@@ -42,19 +42,44 @@ else:
     st.stop()
 
 # --- PDF Text Extraction ---
-def extract_text(pdf_path):
-    doc = fitz.open(pdf_path)
-    text = ""
-    for page in doc:
-        text += page.get_text()
-    return text
 
-def chunk_text(text, chunk_size=500, overlap=50):
+# --- Section-based Job Spec Parsing ---
+import re
+from typing import List, Dict
+
+def extract_sections(pdf_path):
+    doc = fitz.open(pdf_path)
+    section_pattern = re.compile(r"(\d{6})([\s\S]*?)(end of section)", re.IGNORECASE)
+    sections = []
+    for page_num, page in enumerate(doc):
+        text = page.get_text()
+        for match in section_pattern.finditer(text):
+            section_number = match.group(1)
+            section_text = match.group(2).strip()
+            # Save section with section number, text, and page number
+            sections.append({
+                "section_number": section_number,
+                "text": section_text,
+                "page_number": page_num + 1
+            })
+    return sections
+
+
+# Chunking with metadata
+def chunk_section(section, chunk_size=500, overlap=50):
+    text = section["text"]
+    section_number = section["section_number"]
+    page_number = section["page_number"]
     chunks = []
     start = 0
     while start < len(text):
         end = min(start + chunk_size, len(text))
-        chunks.append(text[start:end])
+        chunk_text = text[start:end]
+        chunks.append({
+            "text": chunk_text,
+            "section_number": section_number,
+            "page_number": page_number
+        })
         start += chunk_size - overlap
     return chunks
 
@@ -75,29 +100,59 @@ def build_faiss_index(embeddings):
     return index
 
 # --- Processing ---
+
+# --- Section Filtering UI ---
+st.subheader("Section Filtering (Job Spec)")
+section_input = st.text_input("Enter section numbers to process (comma separated, e.g. 033000,033100):", "")
+selected_sections = [s.strip() for s in section_input.split(",") if s.strip()]
+
 if st.button("Run Semantic Search"):
     prod_path = os.path.join(UPLOAD_DIR, product_file)
     job_path = os.path.join(UPLOAD_DIR, job_file)
-    prod_text = extract_text(prod_path)
-    job_text = extract_text(job_path)
 
-    prod_chunks = chunk_text(prod_text)
-    job_chunks = chunk_text(job_text)
+    # Product text chunking (no change)
+    doc_prod = fitz.open(prod_path)
+    prod_text = "".join([page.get_text() for page in doc_prod])
+    prod_chunks = []
+    prod_chunk_size = 500
+    prod_overlap = 50
+    start = 0
+    while start < len(prod_text):
+        end = min(start + prod_chunk_size, len(prod_text))
+        prod_chunks.append(prod_text[start:end])
+        start += prod_chunk_size - prod_overlap
 
-    st.write(f"Product chunks: {len(prod_chunks)} | Job spec chunks: {len(job_chunks)}")
+    # Job spec section parsing and filtering
+    all_sections = extract_sections(job_path)
+    if selected_sections:
+        filtered_sections = [s for s in all_sections if s["section_number"] in selected_sections]
+    else:
+        filtered_sections = all_sections
+    # Chunk filtered sections
+    job_chunks_meta = []
+    for section in filtered_sections:
+        job_chunks_meta.extend(chunk_section(section))
+    job_chunks = [c["text"] for c in job_chunks_meta]
 
+    st.write(f"Product chunks: {len(prod_chunks)} | Job spec chunks: {len(job_chunks)} | Sections: {', '.join(selected_sections) if selected_sections else 'All'}")
+
+    # Embedding and FAISS
     job_embeds = embed_chunks(job_chunks)
     faiss_index = build_faiss_index(np.array(job_embeds))
-
     prod_embeds = embed_chunks(prod_chunks)
 
     st.subheader("Results")
     for i, (prod_chunk, prod_embed) in enumerate(zip(prod_chunks, prod_embeds)):
         D, I = faiss_index.search(np.array([prod_embed]), k=1)
         match_idx = I[0][0]
-        match_text = job_chunks[match_idx]
+        match_meta = job_chunks_meta[match_idx]
+        match_text = match_meta["text"]
+        section_number = match_meta["section_number"]
+        page_number = match_meta["page_number"]
         st.markdown(f"**Feature {i+1}:**")
         st.code(prod_chunk[:300] + ("..." if len(prod_chunk) > 300 else ""))
         st.markdown("**Matching Job Spec Text:**")
         st.code(match_text[:300] + ("..." if len(match_text) > 300 else ""))
+        st.write(f"Section: {section_number} | Page: {page_number}")
+        st.markdown(f"[Jump to original section] (Section {section_number}, Page {page_number})")
         st.write("---")
